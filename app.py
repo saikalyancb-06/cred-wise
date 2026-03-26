@@ -6,6 +6,9 @@ import pandas as pd
 import numpy as np
 import os
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
+
+load_dotenv()
 
 try:
     from stock_analysis import StockAnalysisSystem
@@ -14,7 +17,7 @@ except ImportError:
     STOCK_SYSTEM_AVAILABLE = False
 
 
-st.set_page_config(page_title="AI Credit Scoring (Thin-File)", page_icon="💳", layout="wide")
+st.set_page_config(page_title="CredWise", page_icon="💳", layout="wide")
 
 
 # Load trained ML models
@@ -185,15 +188,18 @@ def compute_score_and_breakdown(
     savings_points = max(0, min(120, int(savings_ratio * 200)))
     investment_points = max(0, min(80, int(investment_ratio * 150)))
 
+    # Continuous expense impact so expense reductions always change score.
+    expense_impact_points = int((0.6 - expense_ratio) * 180)
+    expense_impact_points = max(-120, min(120, expense_impact_points))
+
     # Negative contributions
-    high_expense_points = max(0, min(120, int(max(0.0, expense_ratio - 0.5) * 240)))
     high_discretionary_points = max(0, min(100, int(max(0.0, discretionary_ratio - 0.3) * 220)))
 
     score_raw = (
         base_score
         + savings_points
         + investment_points
-        - high_expense_points
+        + expense_impact_points
         - high_discretionary_points
     )
     final_score = max(300, min(850, int(score_raw)))
@@ -201,7 +207,7 @@ def compute_score_and_breakdown(
     breakdown.append(("Base score", f"+{base_score}"))
     breakdown.append(("Savings habit", f"+{savings_points}"))
     breakdown.append(("Investment behavior", f"+{investment_points}"))
-    breakdown.append(("High expenses", f"-{high_expense_points}"))
+    breakdown.append(("Expense management", f"{expense_impact_points:+d}"))
     breakdown.append(("High discretionary spending", f"-{high_discretionary_points}"))
 
     features = {
@@ -421,7 +427,22 @@ with tab1:
             monthly_income = st.number_input("Monthly Income", min_value=0.0, value=30000.0, step=1000.0)
             monthly_expenses = st.number_input("Monthly Expenses", min_value=0.0, value=15000.0, step=1000.0)
             savings = st.number_input("Savings", min_value=0.0, value=5000.0, step=500.0)
-            discretionary_pct = st.slider("Discretionary Spending (%)", min_value=0, max_value=100, value=30)
+            
+            # Dynamically calculate the maximum discretionary spending possible
+            remaining_money = monthly_income - monthly_expenses - savings
+            if monthly_income > 0:
+                max_disc_pct = max(0, int((remaining_money / monthly_income) * 100))
+            else:
+                max_disc_pct = 100
+            slider_max = max(1, max_disc_pct)
+            
+            discretionary_pct = st.slider(
+                "Discretionary Spending (%)", 
+                min_value=0, 
+                max_value=slider_max, 
+                value=min(30, max_disc_pct),
+                help="Capped automatically based on your remaining disposable income."
+            )
             investment_amount = st.number_input(
                 "Investment Amount (Optional)",
                 min_value=0.0,
@@ -644,9 +665,9 @@ with tab1:
 
             sim_col1, sim_col2 = st.columns(2)
             with sim_col1:
-                expense_reduction_pct = st.slider("Expenses Reduction (%)", 0, 50, 10)
+                expense_reduction_pct = st.slider("Expenses Reduction (%)", 0, 50, 10, key="whatif_expense_reduction_pct")
             with sim_col2:
-                savings_increase_pct = st.slider("Savings Increase (%)", 0, 100, 20)
+                savings_increase_pct = st.slider("Savings Increase (%)", 0, 100, 20, key="whatif_savings_increase_pct")
 
             sim_expenses = monthly_expenses * (1 - expense_reduction_pct / 100.0)
             sim_savings = savings * (1 + savings_increase_pct / 100.0)
@@ -982,6 +1003,32 @@ with tab3:
                             
                             with detail_col4:
                                 st.metric("Forecast Strength", recommendation.get('forecast_strength', 'N/A'))
+                            
+                            # ✨ Elite AI Analyst Feature
+                            st.markdown("<hr>", unsafe_allow_html=True)
+                            st.subheader("🧠 Elite AI Investment Analyst")
+                            
+                            gemini_api_key = os.environ.get("GEMINI_API_KEY")
+                            if not gemini_api_key:
+                                st.warning("Please configure your GEMINI_API_KEY in the .env file. (Note: Gemini keys start with AIzaSy...)")
+                            else:
+                                with st.spinner(f"Consulting Elite AI on {stock_ticker}..."):
+                                    from elite_ai_analyst import get_elite_ai_analysis
+                                    
+                                    ai_content, ai_error = get_elite_ai_analysis(
+                                        ticker=stock_ticker,
+                                        ml_data=recommendation,
+                                        risk_profile=risk_level,
+                                        investment_horizon=investment_horizon,
+                                        api_key=gemini_api_key
+                                    )
+                                    
+                                    if ai_error:
+                                        st.error(f"Elite AI Analyst Error: {ai_error}")
+                                    else:
+                                        st.success("Elite AI Analysis Complete!")
+                                        with st.expander("🧠 Elite AI Investment Analyst Full Report", expanded=True):
+                                            st.markdown(ai_content)
                     
                     except Exception as e:
                         st.error(f"❌ Analysis failed: {str(e)}")
