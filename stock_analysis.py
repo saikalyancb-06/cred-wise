@@ -12,6 +12,7 @@ from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.preprocessing import StandardScaler
 import warnings
 from datetime import datetime, timedelta
+import time
 import yfinance as yf
 
 warnings.filterwarnings('ignore')
@@ -27,6 +28,8 @@ class StockAnalysisSystem:
         self.model = None
         self.scaler = StandardScaler()
         self.feature_cols = ['MA_10', 'MA_50', 'returns', 'volatility', 'momentum', 'Volume']
+        self._live_data_cache = {}
+        self._live_data_cache_ttl_sec = 120
         print("🔄 Initializing Stock Analysis System...")
         self._load_and_preprocess()
         self._engineer_features()
@@ -71,22 +74,13 @@ class StockAnalysisSystem:
         print("\n[2] Feature Engineering...")
         
         if 'Company' in self.df.columns:
-            # Process each company separately
-            for company in self.df['Company'].unique():
-                company_mask = self.df['Company'] == company
-                
-                # Calculate returns
-                self.df.loc[company_mask, 'returns'] = self.df.loc[company_mask, 'Close'].pct_change()
-                
-                # Moving averages
-                self.df.loc[company_mask, 'MA_10'] = self.df.loc[company_mask, 'Close'].rolling(window=10, min_periods=1).mean()
-                self.df.loc[company_mask, 'MA_50'] = self.df.loc[company_mask, 'Close'].rolling(window=50, min_periods=1).mean()
-                
-                # Volatility (rolling std dev of returns)
-                self.df.loc[company_mask, 'volatility'] = self.df.loc[company_mask, 'returns'].rolling(window=10, min_periods=1).std()
-                
-                # Momentum (10-day price change)
-                self.df.loc[company_mask, 'momentum'] = self.df.loc[company_mask, 'Close'] - self.df.loc[company_mask, 'Close'].shift(10)
+            # Vectorized group-wise feature generation avoids repeated boolean masking.
+            grouped = self.df.groupby('Company', group_keys=False)
+            self.df['returns'] = grouped['Close'].pct_change()
+            self.df['MA_10'] = grouped['Close'].transform(lambda s: s.rolling(window=10, min_periods=1).mean())
+            self.df['MA_50'] = grouped['Close'].transform(lambda s: s.rolling(window=50, min_periods=1).mean())
+            self.df['volatility'] = grouped['returns'].transform(lambda s: s.rolling(window=10, min_periods=1).std())
+            self.df['momentum'] = grouped['Close'].transform(lambda s: s - s.shift(10))
         else:
             # Single stock
             self.df['returns'] = self.df['Close'].pct_change()
@@ -96,7 +90,7 @@ class StockAnalysisSystem:
             self.df['momentum'] = self.df['Close'] - self.df['Close'].shift(10)
         
         # Fill NaN created by rolling/shift operations
-        self.df = self.df.fillna(method='bfill').fillna(method='ffill')
+        self.df = self.df.bfill().ffill()
         
         print(f"   ✓ Engineered features: {self.feature_cols}")
         print(f"   ✓ Features shape: {len(self.df)} x {len(self.df.columns)}")
@@ -207,14 +201,20 @@ class StockAnalysisSystem:
         - DataFrame with OHLCV data and engineered features
         - Error message if failed
         """
+        ticker_normalized = str(ticker).strip().upper()
+        cache_key = (ticker_normalized, period)
+        cached = self._live_data_cache.get(cache_key)
+        if cached and (time.time() - cached['timestamp']) < self._live_data_cache_ttl_sec:
+            return cached['data'], None
+
         try:
-            print(f"\n🔄 Fetching live data for {ticker}...")
+            print(f"\n🔄 Fetching live data for {ticker_normalized}...")
             
             # Fetch data from yfinance
-            stock_data = yf.download(ticker, period=period, progress=False)
+            stock_data = yf.download(ticker_normalized, period=period, progress=False)
             
             if stock_data is None or len(stock_data) == 0:
-                return None, f"No data found for ticker '{ticker}'. Please check the symbol."
+                return None, f"No data found for ticker '{ticker_normalized}'. Please check the symbol."
             
             # Flatten MultiIndex columns if present (yfinance returns MultiIndex for single ticker)
             if isinstance(stock_data.columns, pd.MultiIndex):
@@ -236,11 +236,15 @@ class StockAnalysisSystem:
             
             # Engineer features
             stock_data = self._engineer_features_live(stock_data)
+            self._live_data_cache[cache_key] = {
+                'timestamp': time.time(),
+                'data': stock_data,
+            }
             
             return stock_data, None
             
         except Exception as e:
-            return None, f"Error fetching data for '{ticker}': {str(e)}"
+            return None, f"Error fetching data for '{ticker_normalized}': {str(e)}"
 
     def _engineer_features_live(self, df):
         """
@@ -264,11 +268,11 @@ class StockAnalysisSystem:
         df['momentum'] = df['Close'] - df['Close'].shift(10)
         
         # Fill NaN created by rolling/shift operations
-        df = df.fillna(method='bfill').fillna(method='ffill')
+        df = df.bfill().ffill()
         
         return df
 
-    def predict_price_live(self, ticker, prediction_date=None):
+    def predict_price_live(self, ticker, prediction_date=None, stock_df=None):
         """
         Predict price for ANY stock ticker using live data from yfinance.
         
@@ -280,11 +284,14 @@ class StockAnalysisSystem:
         - (lower_bound, upper_bound, current_price, error_message)
         """
         
-        # Fetch live data
-        stock_df, fetch_error = self.fetch_live_stock_data(ticker)
+        # Fetch live data if not already provided by caller.
+        if stock_df is None:
+            stock_df, fetch_error = self.fetch_live_stock_data(ticker)
+            if fetch_error:
+                return None, None, None, fetch_error
         
-        if fetch_error:
-            return None, None, None, fetch_error
+        if stock_df is None or len(stock_df) == 0:
+            return None, None, None, "No live data available for prediction"
         
         if prediction_date is None:
             prediction_date = stock_df.iloc[-1]['Date'].date() + timedelta(days=30)
@@ -347,14 +354,14 @@ class StockAnalysisSystem:
         
         return lower_bound, upper_bound, current_price, None
 
-    def analyze_trend_live(self, ticker):
+    def analyze_trend_live(self, ticker, stock_df=None):
         """Analyze current trend for ANY stock using live data."""
         
-        # Fetch live data
-        stock_df, fetch_error = self.fetch_live_stock_data(ticker)
-        
-        if fetch_error:
-            return None, fetch_error
+        # Fetch live data if not already provided by caller.
+        if stock_df is None:
+            stock_df, fetch_error = self.fetch_live_stock_data(ticker)
+            if fetch_error:
+                return None, fetch_error
         
         if len(stock_df) < 50:
             return None, f"Insufficient data: {len(stock_df)} records (need 50+)"
@@ -398,14 +405,14 @@ class StockAnalysisSystem:
             'latest_price': latest['Close'],
         }, None
 
-    def predict_future_trend_live(self, ticker, horizon=30):
+    def predict_future_trend_live(self, ticker, horizon=30, stock_df=None):
         """Predict trend for ANY stock using live data."""
         
-        # Fetch live data
-        stock_df, fetch_error = self.fetch_live_stock_data(ticker)
-        
-        if fetch_error:
-            return "Insufficient data", 0
+        # Fetch live data if not already provided by caller.
+        if stock_df is None:
+            stock_df, fetch_error = self.fetch_live_stock_data(ticker)
+            if fetch_error:
+                return "Insufficient data", 0
         
         if len(stock_df) < 50:
             return f"Insufficient data: {len(stock_df)} records", 0
@@ -452,6 +459,14 @@ class StockAnalysisSystem:
         print(f"\n{'='*70}")
         print(f"GENERATING LIVE INVESTMENT RECOMMENDATION FOR: {ticker.upper()}")
         print(f"{'='*70}")
+
+        # Fetch once and reuse across all live analysis steps.
+        stock_df, fetch_error = self.fetch_live_stock_data(ticker)
+        if fetch_error:
+            return {
+                'error': fetch_error,
+                'status': 'FAILED'
+            }
         
         target_date = datetime.now().date() + timedelta(days=max(1, int(investment_horizon)))
 
@@ -459,6 +474,7 @@ class StockAnalysisSystem:
         lower_bound, upper_bound, current_price, price_error = self.predict_price_live(
             ticker,
             prediction_date=target_date,
+            stock_df=stock_df,
         )
         if price_error:
             return {
@@ -467,7 +483,7 @@ class StockAnalysisSystem:
             }
         
         # Get trend analysis
-        trend_data, trend_error = self.analyze_trend_live(ticker)
+        trend_data, trend_error = self.analyze_trend_live(ticker, stock_df=stock_df)
         if trend_error:
             return {
                 'error': trend_error,
@@ -475,7 +491,11 @@ class StockAnalysisSystem:
             }
         
         # Get future prediction
-        forecast, forecast_strength = self.predict_future_trend_live(ticker, investment_horizon)
+        forecast, forecast_strength = self.predict_future_trend_live(
+            ticker,
+            investment_horizon,
+            stock_df=stock_df,
+        )
         
         volatility_pct = trend_data['volatility']
         

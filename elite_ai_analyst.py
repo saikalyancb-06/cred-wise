@@ -1,5 +1,24 @@
 import google.generativeai as genai
 import yfinance as yf
+from functools import lru_cache
+
+
+@lru_cache(maxsize=64)
+def _fetch_fundamental_data(ticker):
+    """Cache ticker fundamentals to avoid repeated network calls in a session."""
+    stock = yf.Ticker(ticker)
+    info = stock.info
+    return {
+        "Forward P/E": info.get("forwardPE", "N/A"),
+        "Trailing P/E": info.get("trailingPE", "N/A"),
+        "Beta": info.get("beta", "N/A"),
+        "Debt to Equity": info.get("debtToEquity", "N/A"),
+        "Profit Margin": f"{info.get('profitMargins', 0)*100:.2f}%" if info.get('profitMargins') else "N/A",
+        "Return on Equity": f"{info.get('returnOnEquity', 0)*100:.2f}%" if info.get('returnOnEquity') else "N/A",
+        "Revenue Growth": f"{info.get('revenueGrowth', 0)*100:.2f}%" if info.get('revenueGrowth') else "N/A",
+        "52 Week High": info.get("fiftyTwoWeekHigh", "N/A"),
+        "52 Week Low": info.get("fiftyTwoWeekLow", "N/A"),
+    }
 
 def get_elite_ai_analysis(ticker, ml_data, risk_profile, investment_horizon, api_key):
     """Call Gemini API using the Elite AI Analyst template, enriched by ML data and YFinance fundamental data."""
@@ -23,19 +42,7 @@ def get_elite_ai_analysis(ticker, ml_data, risk_profile, investment_horizon, api
     # Fetch live fundamental data to give Gemini "extra details"
     fund_data = {}
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
-        fund_data = {
-            "Forward P/E": info.get("forwardPE", "N/A"),
-            "Trailing P/E": info.get("trailingPE", "N/A"),
-            "Beta": info.get("beta", "N/A"),
-            "Debt to Equity": info.get("debtToEquity", "N/A"),
-            "Profit Margin": f"{info.get('profitMargins', 0)*100:.2f}%" if info.get('profitMargins') else "N/A",
-            "Return on Equity": f"{info.get('returnOnEquity', 0)*100:.2f}%" if info.get('returnOnEquity') else "N/A",
-            "Revenue Growth": f"{info.get('revenueGrowth', 0)*100:.2f}%" if info.get('revenueGrowth') else "N/A",
-            "52 Week High": info.get("fiftyTwoWeekHigh", "N/A"),
-            "52 Week Low": info.get("fiftyTwoWeekLow", "N/A"),
-        }
+        fund_data = _fetch_fundamental_data(str(ticker).strip().upper())
     except Exception:
         # Silently fail if YFinance blocks or errors, just provide what we can
         fund_data = {"Error": "Could not fetch fundamental data"}

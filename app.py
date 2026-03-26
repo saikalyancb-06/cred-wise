@@ -1113,7 +1113,3 @@ with tab3:
 
 st.markdown("---")
 st.caption("This is an educational AI model for predictive assessment and not an official financial institution decision.")
-
-if enable_live_monitoring:
-    time.sleep(3)
-    st.rerun()
